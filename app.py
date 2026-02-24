@@ -1,53 +1,96 @@
-import json
 import math
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Pedigree Drawer (SVG)", layout="wide")
+st.set_page_config(page_title="Pedigree Drawer (Table Input)", layout="wide")
 
 # =============================
-# 示例数据（可直接改）
+# 默认示例数据（表格）
 # =============================
-DEFAULT_JSON = json.dumps(
-    [
-        {"id":"P1","name":"患者","sex":"F","affected":True,  "father_id":"P2","mother_id":"P3","proband":True},
-        {"id":"P2","name":"父亲","sex":"M","affected":False, "father_id":"P4","mother_id":"P5"},
-        {"id":"P3","name":"母亲","sex":"F","affected":False, "father_id":"P6","mother_id":"P7"},
-        {"id":"P4","name":"祖父(父系)","sex":"M","affected":True},
-        {"id":"P5","name":"祖母(父系)","sex":"F","affected":False},
-        {"id":"P6","name":"外祖父","sex":"M","affected":False},
-        {"id":"P7","name":"外祖母","sex":"F","affected":True},
-        {"id":"P8","name":"姐姐","sex":"F","affected":False, "father_id":"P2","mother_id":"P3"},
-        {"id":"P9","name":"弟弟","sex":"M","affected":True,  "father_id":"P2","mother_id":"P3"}
-    ],
-    ensure_ascii=False,
-    indent=2
-)
+DEFAULT_ROWS = [
+    {"id":"P1","name":"患者","sex":"F","affected":True,  "father_id":"P2","mother_id":"P3","proband":True},
+    {"id":"P2","name":"父亲","sex":"M","affected":False, "father_id":"P4","mother_id":"P5","proband":False},
+    {"id":"P3","name":"母亲","sex":"F","affected":False, "father_id":"P6","mother_id":"P7","proband":False},
+    {"id":"P4","name":"祖父(父系)","sex":"M","affected":True,  "father_id":"","mother_id":"","proband":False},
+    {"id":"P5","name":"祖母(父系)","sex":"F","affected":False, "father_id":"","mother_id":"","proband":False},
+    {"id":"P6","name":"外祖父","sex":"M","affected":False, "father_id":"","mother_id":"","proband":False},
+    {"id":"P7","name":"外祖母","sex":"F","affected":True,  "father_id":"","mother_id":"","proband":False},
+    {"id":"P8","name":"姐姐","sex":"F","affected":False, "father_id":"P2","mother_id":"P3","proband":False},
+    {"id":"P9","name":"弟弟","sex":"M","affected":True,  "father_id":"P2","mother_id":"P3","proband":False},
+]
+
+# =============================
+# 工具函数：DataFrame -> people(list)
+# =============================
+def df_to_people(df: pd.DataFrame):
+    rows = []
+    for _, r in df.iterrows():
+        pid = str(r.get("id", "")).strip()
+        if not pid:
+            continue  # 跳过空行
+
+        name = str(r.get("name", "")).strip() or pid
+        sex = str(r.get("sex", "U")).strip().upper() or "U"
+
+        def to_bool(v):
+            if isinstance(v, bool):
+                return v
+            if pd.isna(v):
+                return False
+            s = str(v).strip().lower()
+            return s in ["true", "1", "yes", "y", "是"]
+
+        affected = to_bool(r.get("affected", False))
+        proband = to_bool(r.get("proband", False))
+
+        father_id = str(r.get("father_id", "")).strip()
+        mother_id = str(r.get("mother_id", "")).strip()
+        father_id = father_id if father_id else None
+        mother_id = mother_id if mother_id else None
+
+        rows.append({
+            "id": pid,
+            "name": name,
+            "sex": sex,
+            "affected": affected,
+            "father_id": father_id,
+            "mother_id": mother_id,
+            "proband": proband
+        })
+    return rows
 
 # =============================
 # 校验
 # =============================
 def validate_people(people):
     if not isinstance(people, list):
-        raise ValueError("JSON 顶层必须是列表（list）。")
+        raise ValueError("输入数据必须是列表。")
+
     ids = [p.get("id") for p in people]
-    if any(i is None for i in ids):
+    if any(i is None or str(i).strip() == "" for i in ids):
         raise ValueError("每个人都必须有 id。")
     if len(ids) != len(set(ids)):
-        raise ValueError("存在重复 id，请检查。")
+        raise ValueError("存在重复 id，请检查（id 不能重复）。")
 
     id_set = set(ids)
     for p in people:
         sex = p.get("sex", "U")
         if sex not in ["M", "F", "U"]:
-            raise ValueError(f"{p['id']} 的 sex 必须是 'M'/'F'/'U'。")
+            raise ValueError(f"{p['id']} 的 sex 必须是 M/F/U。")
+
         for k in ["father_id", "mother_id"]:
             v = p.get(k)
             if v and v not in id_set:
-                raise ValueError(f"{p['id']} 的 {k}={v} 不存在于列表中。")
+                raise ValueError(f"{p['id']} 的 {k}={v} 不存在（请先添加该人物）。")
+
+    # 最多一个 proband（可选）
+    probands = [p["id"] for p in people if p.get("proband")]
+    if len(probands) > 1:
+        raise ValueError(f"只能有一个患者（proband=True），当前有多个：{probands}")
 
 # =============================
-# 代际计算（0=最上层）
+# 代际计算
 # =============================
 def compute_generations(people):
     person_map = {p["id"]: p for p in people}
@@ -81,8 +124,7 @@ def compute_generations(people):
     return gen
 
 # =============================
-# 构建家庭单元
-# key=(father_id,mother_id) -> [child_ids]
+# 家庭单元
 # =============================
 def build_families(people):
     families = {}
@@ -94,148 +136,130 @@ def build_families(people):
     return families
 
 # =============================
-# 简单布局（横平竖直）
-# 思路：
-# - 每代一行
-# - 每代按“家庭块”分组排
-# - 父母并排；子女在下一代同块居中
+# 布局（横平竖直）
 # =============================
 def layout_people(people):
-    person_map = {p["id"]: p for p in people}
     gen = compute_generations(people)
     families = build_families(people)
 
-    # 先按代分组
     gen_to_ids = {}
     for p in people:
         gen_to_ids.setdefault(gen[p["id"]], []).append(p["id"])
 
-    # 固定参数（可调）
     x_gap = 120
-    y_gap = 160
-    margin_x = 60
-    margin_y = 70
+    y_gap = 170
+    margin_x = 70
+    margin_y = 80
 
-    coords = {}  # pid -> (x,y), y 是图形中心
-    drawn = set()
-
+    coords = {}
     max_gen = max(gen_to_ids.keys()) if gen_to_ids else 0
 
-    # 1) 先放置有孩子的父母家庭块（按代）
     for g in range(max_gen + 1):
         y = margin_y + g * y_gap
         x_cursor = margin_x
 
-        # 找这一代作为父母的家庭
         fams_this_gen = []
         for (fid, mid), children in families.items():
             if gen.get(fid) == g and gen.get(mid) == g:
-                fams_this_gen.append((fid, mid, children))
-
-        # 为了稳定显示，按父母id排序
+                fams_this_gen.append((fid, mid, sorted(children)))
         fams_this_gen.sort(key=lambda x: (x[0], x[1]))
 
+        placed_in_gen = set()
+
         for fid, mid, children in fams_this_gen:
-            # 父母位置（并排）
             if fid not in coords:
                 coords[fid] = (x_cursor, y)
             if mid not in coords:
                 coords[mid] = (x_cursor + x_gap, y)
 
-            drawn.add(fid)
-            drawn.add(mid)
+            placed_in_gen.update([fid, mid])
 
-            # 子女在下一代，围绕父母中点展开
+            # 子女摆在下一代，围绕父母中点
             child_y = margin_y + (g + 1) * y_gap
-            mid_x = (coords[fid][0] + coords[mid][0]) / 2
+            center_x = (coords[fid][0] + coords[mid][0]) / 2
             n = len(children)
-            total_width = (n - 1) * x_gap
-            start_x = mid_x - total_width / 2
+            start_x = center_x - ((n - 1) * x_gap) / 2
 
-            for i, cid in enumerate(sorted(children)):
+            for i, cid in enumerate(children):
                 if cid not in coords:
                     coords[cid] = (start_x + i * x_gap, child_y)
-                drawn.add(cid)
 
-            # 给下一个家庭块留空
-            block_width = max(2 * x_gap, (len(children) - 1) * x_gap + x_gap)
-            x_cursor += block_width + 80
+            block_w = max(2 * x_gap, (max(1, n) - 1) * x_gap + x_gap)
+            x_cursor += block_w + 90
 
-        # 2) 这一代还有没放进去的人（比如祖辈中无配偶记录/单独个体）
-        leftovers = [pid for pid in sorted(gen_to_ids.get(g, [])) if pid not in coords]
+        # 这一代剩余未放置人物（无配偶记录或单独）
+        leftovers = [pid for pid in sorted(gen_to_ids.get(g, [])) if pid not in placed_in_gen and pid not in coords]
         for pid in leftovers:
             coords[pid] = (x_cursor, y)
             x_cursor += x_gap
 
-    # 画布尺寸估算
     if coords:
         max_x = max(x for x, _ in coords.values())
         max_y = max(y for _, y in coords.values())
     else:
         max_x, max_y = 600, 300
 
-    width = int(max_x + 120)
-    height = int(max_y + 140)
-
-    return coords, gen, families, width, height
+    width = int(max_x + 140)
+    height = int(max_y + 170)
+    return coords, families, width, height
 
 # =============================
-# SVG 绘制
+# SVG生成
 # =============================
-def pedigree_to_svg(people, title="Pedigree Demo", show_labels=True):
+def line(x1, y1, x2, y2, w=2.5):
+    return f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="black" stroke-width="{w}" />'
+
+def esc(s):
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def pedigree_to_svg(people, title="Pedigree", show_labels=True):
     validate_people(people)
-    person_map = {p["id"]: p for p in people}
-    coords, gen, families, width, height = layout_people(people)
+    coords, families, width, height = layout_people(people)
 
-    # 样式参数
-    r = 26                # 圆半径/方块半宽
-    line_w = 2.5
-    label_offset = 42
+    r = 26
+    spouse_line_w = 2.4
+    label_font = 14
+    label_offset = 48
 
     svg = []
     svg.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" style="background:white">')
+    svg.append(f'<text x="{width/2}" y="36" text-anchor="middle" font-size="22" font-family="Arial, Microsoft YaHei">{esc(title)}</text>')
 
-    # 标题
-    safe_title = escape_xml(title)
-    svg.append(f'<text x="{width/2}" y="34" text-anchor="middle" font-size="22" font-family="Arial, Microsoft YaHei">{safe_title}</text>')
-
-    # 1) 先画连线（横平竖直）
+    # 连线：全部横平竖直
     for (fid, mid), children in families.items():
         if fid not in coords or mid not in coords:
             continue
         fx, fy = coords[fid]
         mx, my = coords[mid]
 
-        # 夫妻线（水平）
-        y_spouse = fy
-        x_left = min(fx, mx)
-        x_right = max(fx, mx)
-        svg.append(line(x_left, y_spouse, x_right, y_spouse, line_w))
+        left_x, right_x = sorted([fx, mx])
 
-        # 子代连接（从夫妻中点往下）
+        # 夫妻线
+        svg.append(line(left_x, fy, right_x, fy, spouse_line_w))
+
         if children:
-            cx = (fx + mx) / 2
-            child_points = [(coords[cid][0], coords[cid][1]) for cid in children if cid in coords]
-            if child_points:
-                child_y = child_points[0][1]
-                y_drop = y_spouse + 38  # 从夫妻线往下的水平子代线位置
+            center_x = (fx + mx) / 2
+            y_sib = fy + 42  # 子代横线高度（固定在父母下方）
 
-                # 竖线：夫妻中点 -> 子代水平线
-                svg.append(line(cx, y_spouse, cx, y_drop, line_w))
+            valid_children = [cid for cid in children if cid in coords]
+            if not valid_children:
+                continue
+            child_points = [(coords[cid][0], coords[cid][1]) for cid in valid_children]
 
-                xs = sorted([x for x, _ in child_points])
-                # 子代横线
-                if len(xs) >= 2:
-                    svg.append(line(xs[0], y_drop, xs[-1], y_drop, line_w))
+            # 中轴竖线
+            svg.append(line(center_x, fy, center_x, y_sib, spouse_line_w))
 
-                # 每个子女竖线（从子代横线到个体）
-                for x, y in child_points:
-                    svg.append(line(x, y_drop, x, y, line_w))
-                # 单个子女时，没有子代横线也无所谓，直接竖线
+            xs = sorted([x for x, _ in child_points])
+            if len(xs) > 1:
+                svg.append(line(xs[0], y_sib, xs[-1], y_sib, spouse_line_w))
+
+            # 每个子女竖线
+            for cx, cy in child_points:
                 if len(xs) == 1:
-                    svg.append(line(xs[0], y_drop, xs[0], child_y, line_w))
+                    svg.append(line(center_x, y_sib, cx, y_sib, spouse_line_w))
+                svg.append(line(cx, y_sib, cx, cy - r, spouse_line_w))
 
-    # 2) 画人物节点
+    # 节点
     for p in people:
         pid = p["id"]
         x, y = coords[pid]
@@ -244,22 +268,18 @@ def pedigree_to_svg(people, title="Pedigree Demo", show_labels=True):
         proband = bool(p.get("proband", False))
         name = p.get("name", pid)
 
-        stroke_w = 3.5 if proband else 2.5
         fill = "black" if affected else "white"
+        stroke_w = 3.6 if proband else 2.5
 
         if sex == "M":
-            # 方块
             svg.append(
-                f'<rect x="{x-r}" y="{y-r}" width="{2*r}" height="{2*r}" '
-                f'fill="{fill}" stroke="black" stroke-width="{stroke_w}" />'
+                f'<rect x="{x-r}" y="{y-r}" width="{2*r}" height="{2*r}" fill="{fill}" stroke="black" stroke-width="{stroke_w}" />'
             )
         elif sex == "F":
-            # 圆圈
             svg.append(
                 f'<circle cx="{x}" cy="{y}" r="{r}" fill="{fill}" stroke="black" stroke-width="{stroke_w}" />'
             )
         else:
-            # 菱形（不明）
             pts = f"{x},{y-r} {x+r},{y} {x},{y+r} {x-r},{y}"
             svg.append(
                 f'<polygon points="{pts}" fill="{fill}" stroke="black" stroke-width="{stroke_w}" />'
@@ -267,68 +287,97 @@ def pedigree_to_svg(people, title="Pedigree Demo", show_labels=True):
 
         if show_labels:
             svg.append(
-                f'<text x="{x}" y="{y+label_offset}" text-anchor="middle" '
-                f'font-size="14" font-family="Arial, Microsoft YaHei">{escape_xml(name)}</text>'
+                f'<text x="{x}" y="{y+label_offset}" text-anchor="middle" font-size="{label_font}" font-family="Arial, Microsoft YaHei">{esc(name)}</text>'
             )
+
+        # proband 简单箭头（可选展示）
+        if proband:
+            ax1, ay1 = x - 48, y - 38
+            ax2, ay2 = x - 12, y - 8
+            svg.append(line(ax1, ay1, ax2, ay2, 2.2))
+            # 箭头头
+            svg.append(line(ax2, ay2, ax2 - 8, ay2 - 2, 2.2))
+            svg.append(line(ax2, ay2, ax2 - 2, ay2 - 8, 2.2))
 
     svg.append("</svg>")
     return "".join(svg)
 
-def line(x1, y1, x2, y2, w=2):
-    return f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="black" stroke-width="{w}" />'
-
-def escape_xml(s):
-    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
 # =============================
-# UI
+# 页面 UI
 # =============================
-st.title("家系图绘制器（纯事实版｜横平竖直）")
-st.caption("只根据事实绘图，不做推理；线条为横线/竖线，不使用斜线。")
+st.title("家系图绘制器（网页填表版）")
+st.caption("在网页表格里直接填写每位家庭成员信息，生成适用于不同病人的 family tree。")
 
-with st.expander("JSON 输入格式示例（可直接复制修改）", expanded=False):
-    st.code(DEFAULT_JSON, language="json")
+# 初始化 session_state
+if "pedigree_df" not in st.session_state:
+    st.session_state.pedigree_df = pd.DataFrame(DEFAULT_ROWS)
 
-json_text = st.text_area(
-    "在这里粘贴 / 编辑家族史 JSON",
-    value=DEFAULT_JSON,
-    height=320
-)
-
-c1, c2 = st.columns([1.2, 1])
-with c1:
-    graph_title = st.text_input("图标题", value="Pedigree Demo")
-with c2:
+top1, top2, top3 = st.columns([1, 1, 1])
+with top1:
+    if st.button("加载示例数据"):
+        st.session_state.pedigree_df = pd.DataFrame(DEFAULT_ROWS)
+with top2:
+    if st.button("清空表格"):
+        st.session_state.pedigree_df = pd.DataFrame(columns=["id","name","sex","affected","father_id","mother_id","proband"])
+with top3:
     show_labels = st.checkbox("显示姓名标签", value=True)
 
-if st.button("生成家系图", type="primary"):
+st.markdown("### 1) 在表格里填写家族成员信息")
+
+edited_df = st.data_editor(
+    st.session_state.pedigree_df,
+    num_rows="dynamic",
+    use_container_width=True,
+    column_config={
+        "id": st.column_config.TextColumn("id", help="唯一编号，不能重复，例如 P1/P2"),
+        "name": st.column_config.TextColumn("姓名/称谓", help="如 患者、父亲、母亲"),
+        "sex": st.column_config.SelectboxColumn("性别", options=["M", "F", "U"], help="M男 F女 U不明"),
+        "affected": st.column_config.CheckboxColumn("患病"),
+        "father_id": st.column_config.TextColumn("父亲id", help="例如 P2；没有可留空"),
+        "mother_id": st.column_config.TextColumn("母亲id", help="例如 P3；没有可留空"),
+        "proband": st.column_config.CheckboxColumn("患者(先证者)")
+    },
+    key="data_editor_pedigree"
+)
+
+graph_title = st.text_input("2) 图标题", value="Pedigree")
+
+if st.button("3) 生成家系图", type="primary"):
     try:
-        people = json.loads(json_text)
-        svg_html = pedigree_to_svg(people, title=graph_title, show_labels=show_labels)
+        # 保存当前编辑结果
+        st.session_state.pedigree_df = edited_df.copy()
 
-        st.subheader("生成结果")
-        # 用 HTML 直接显示 SVG（比 graphviz_chart 稳）
-        components.html(svg_html, height=700, scrolling=True)
+        people = df_to_people(edited_df)
+        if len(people) == 0:
+            st.warning("表格是空的，请先添加至少一位成员。")
+        else:
+            svg_html = pedigree_to_svg(people, title=graph_title, show_labels=show_labels)
 
-        with st.expander("查看 SVG 源码（调试用）", expanded=False):
-            st.code(svg_html[:5000] + ("\n..." if len(svg_html) > 5000 else ""), language="html")
+            st.markdown("### 生成结果")
+            components.html(svg_html, height=760, scrolling=True)
 
-        st.success("已根据事实生成家系图（横平竖直版）。")
+            with st.expander("查看当前结构化数据（调试用）", expanded=False):
+                st.json(people)
 
-    except json.JSONDecodeError as e:
-        st.error(f"JSON 格式错误：{e}")
+            st.success("已根据网页表格输入生成家系图。")
+
     except Exception as e:
-        st.error(f"运行失败：{e}")
+        st.error(f"生成失败：{e}")
 
-with st.expander("字段说明", expanded=False):
-    st.markdown(
-        """
-- `id`：唯一编号（不能重复）
-- `name`：显示名字（如“父亲”“母亲”“患者”）
-- `sex`：`"M"` 男，`"F"` 女，`"U"` 不明
-- `affected`：`true`（患病，实心）/ `false`（未患病，空心）
-- `father_id`：父亲编号（可选）
-- `mother_id`：母亲编号（可选）
-- `proband`：是否为患者/先证者（可选，`true` 时边框加粗）
-        """
-    )
+with st.expander("填写说明（建议第一次看）", expanded=False):
+    st.markdown("""
+**每一行代表一个人。**
+
+- `id`：唯一编号（例如 `P1`, `P2`）
+- `姓名/称谓`：显示在图上的文字（如“患者”“父亲”）
+- `性别`：`M` 男，`F` 女，`U` 不明
+- `患病`：勾选 = 实心；不勾选 = 空心
+- `父亲id` / `母亲id`：填写对应人的 `id`（不是名字）
+- `患者(先证者)`：可选，只能有一个（会加粗边框+箭头）
+
+**例子：**
+如果“患者”的 `id` 是 `P1`，父亲是 `P2`，母亲是 `P3`，那患者这一行写：
+- `id = P1`
+- `father_id = P2`
+- `mother_id = P3`
+""")
