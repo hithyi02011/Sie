@@ -216,7 +216,7 @@ def person_children_map(child_fams):
     return m
 
 # =============================
-# 家庭块布局（核心修复）
+# 家庭块布局（核心）
 # =============================
 def build_sibling_blocks(sibling_ids, person_map, child_fams, x_gap=160, spouse_gap=105, block_gap=120):
     """
@@ -315,7 +315,7 @@ def structured_layout(people):
     else:
         sib_center_x = cx
 
-    # 2) 同胞层改为“家庭块布局”
+    # 2) 同胞层：家庭块布局
     blocks = build_sibling_blocks(
         sibling_ids, person_map, child_fams, x_gap=x_gap, spouse_gap=spouse_gap, block_gap=block_gap
     )
@@ -330,14 +330,9 @@ def structured_layout(people):
         block_center = cursor + b["width"] / 2
 
         if sp:
-            # 让“本人”尽量靠近核心中心（更整齐）
-            # 若本人在核心中心左侧，则配偶放右；反之配偶放左
-            if block_center <= sib_center_x:
-                coords[sid] = (block_center - spouse_gap / 2, y_sibs)
-                coords[sp] = (block_center + spouse_gap / 2, y_sibs)
-            else:
-                coords[sid] = (block_center - spouse_gap / 2, y_sibs)
-                coords[sp] = (block_center + spouse_gap / 2, y_sibs)
+            # 简单稳定：本人左、配偶右
+            coords[sid] = (block_center - spouse_gap / 2, y_sibs)
+            coords[sp] = (block_center + spouse_gap / 2, y_sibs)
         else:
             coords[sid] = (block_center, y_sibs)
 
@@ -361,7 +356,7 @@ def structured_layout(people):
             coords[mf] = (mx - upper_side_gap / 2, y_gp)
             coords[mm] = (mx + upper_side_gap / 2, y_gp)
 
-    # 5) 同胞各自子代：按 block 的家庭中心展开（减少穿到隔壁）
+    # 5) 同胞各自子代：按 block 的家庭中心展开
     for b in blocks:
         fam_key = b["family_key"]
         children = b["children"]
@@ -425,7 +420,7 @@ def structured_layout(people):
         max_x += shift
 
     width = int(max_x + 280)
-    height = int(max_y + 330)  # 给文字更多底部空间
+    height = int(max_y + 330)  # 底部留空间给标签
 
     return coords, child_fams, width, height, gen
 
@@ -454,13 +449,14 @@ def line(x1, y1, x2, y2, w=2.5):
     return f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="black" stroke-width="{w}" />'
 
 def choose_arrow_anchor(x, y, width, height, used=None):
+    """箭头短一点（按你的要求）"""
     if used is None:
         used = []
     candidates = [
-        (x - 135, y - 95, x - 30, y - 24),
-        (x + 135, y - 95, x + 30, y - 24),
-        (x - 135, y + 95, x - 30, y + 24),
-        (x + 135, y + 95, x + 30, y + 24),
+        (x - 105, y - 72, x - 28, y - 20),
+        (x + 105, y - 72, x + 28, y - 20),
+        (x - 105, y + 72, x - 28, y + 20),
+        (x + 105, y + 72, x + 28, y + 20),
     ]
     def score(c):
         tx1, ty1, tx2, ty2 = c
@@ -475,10 +471,10 @@ def choose_arrow_anchor(x, y, width, height, used=None):
         return penalty
     return min(candidates, key=score)
 
-def compute_label_positions(people, coords, base_offset=78, near_x_threshold=130):
+def compute_label_positions(people, coords, base_offset=58, near_x_threshold=115):
     """
-    简单标签避让：
-    同一层里 x 很近的标签交替下移，减少“妹妹妹妹”“弟弟配偶”式重叠
+    标签更贴近图形底部（按你的要求）
+    同层太近时轻微错位，避免重叠
     """
     rows = {}
     for p in people:
@@ -490,7 +486,7 @@ def compute_label_positions(people, coords, base_offset=78, near_x_threshold=130
 
     label_pos = {}
     for _row_y, items in rows.items():
-        items.sort(key=lambda t: t[1])  # 按x排序
+        items.sort(key=lambda t: t[1])
         cluster = []
         clusters = []
 
@@ -507,14 +503,13 @@ def compute_label_positions(people, coords, base_offset=78, near_x_threshold=130
         if cluster:
             clusters.append(cluster)
 
-        # 每个 cluster 内交替下移
         for cl in clusters:
             for i, (pid, x, y) in enumerate(cl):
                 extra = 0
                 if len(cl) > 1:
-                    # 0, +18, +36, +18, ...
-                    pattern = [0, 18, 36, 18, 36, 54]
-                    extra = pattern[i] if i < len(pattern) else 18 * (i % 3)
+                    # 轻微错位，不要太夸张
+                    pattern = [0, 14, 26, 14, 26, 38]
+                    extra = pattern[i] if i < len(pattern) else 14 * (i % 3)
                 label_pos[pid] = (x, y + base_offset + extra)
 
     return label_pos
@@ -523,14 +518,15 @@ def pedigree_to_svg(people, title="Pedigree", show_labels=True):
     validate_people(people)
     coords, child_fams, width, height, _gen = structured_layout(people)
 
-    # 参数
+    # 参数（按你这次要求调整）
     r = 26
     base_stroke = 2.6
     proband_stroke = 3.8
     spouse_line_w = 2.4
     label_font = 13
-    label_offset = 78
-    child_bar_drop = 42
+
+    label_offset = 58      # 文字更靠近图形底部
+    child_bar_drop = 68    # 蓝线长一点 / 红线短一点（关键）
 
     svg = []
     svg.append(
@@ -547,11 +543,12 @@ def pedigree_to_svg(people, title="Pedigree", show_labels=True):
         if a not in coords or b not in coords:
             continue
         ax, ay = coords[a]
-        bx, by = coords[b]
+        bx, _ = coords[b]
         left_x, right_x = sorted([ax, bx])
         svg.append(line(left_x, ay, right_x, ay, spouse_line_w))
 
     # 2) 父母-子代连线（child_fams）
+    # child_bar_drop 调大 => 蓝圈竖线长、红圈竖线短
     for (fid, mid), children in child_fams.items():
         if fid not in coords or mid not in coords:
             continue
@@ -559,11 +556,12 @@ def pedigree_to_svg(people, title="Pedigree", show_labels=True):
             continue
 
         fx, fy = coords[fid]
-        mx, my = coords[mid]
+        mx, _ = coords[mid]
         spouse_y = fy
         cx = (fx + mx) / 2
         y_sib = spouse_y + child_bar_drop
 
+        # 夫妻中点到同胞横线（蓝圈那类）
         svg.append(line(cx, spouse_y, cx, y_sib, spouse_line_w))
 
         valid_children = [cid for cid in children if cid in coords]
@@ -573,16 +571,20 @@ def pedigree_to_svg(people, title="Pedigree", show_labels=True):
         child_points = [(coords[cid][0], coords[cid][1]) for cid in valid_children]
         xs = sorted([x for x, _ in child_points])
 
+        # 同胞横线
         if len(xs) == 1:
             svg.append(line(cx, y_sib, xs[0], y_sib, spouse_line_w))
         else:
             svg.append(line(xs[0], y_sib, xs[-1], y_sib, spouse_line_w))
 
+        # 同胞横线到孩子图形（红圈那类）
         for px, py in child_points:
             svg.append(line(px, y_sib, px, py - r, spouse_line_w))
 
-    # 3) 标签位置（先算，后画人）
-    label_positions = compute_label_positions(people, coords, base_offset=label_offset, near_x_threshold=130)
+    # 3) 标签位置（先算）
+    label_positions = compute_label_positions(
+        people, coords, base_offset=label_offset, near_x_threshold=115
+    )
 
     # 4) 人物节点
     probands = []
@@ -625,7 +627,7 @@ def pedigree_to_svg(people, title="Pedigree", show_labels=True):
             ey = r + 12
             svg.append(line(x - ex, y + ey, x + ex, y - ey, 3.0))
 
-    # 5) 标签（最后画，避免被线/图形压住）
+    # 5) 标签（最后画，避免被线压）
     if show_labels:
         for p in people:
             pid = p["id"]
@@ -637,7 +639,7 @@ def pedigree_to_svg(people, title="Pedigree", show_labels=True):
                 f'font-size="{label_font}" font-family="Arial, Microsoft YaHei">{esc(p.get("name", pid))}</text>'
             )
 
-    # 6) 先证者箭头（更远）
+    # 6) 先证者箭头（短一点）
     used_arrow_tails = []
     for pid in probands:
         x, y = coords[pid]
@@ -728,7 +730,7 @@ if st.button("3) 生成家系图", type="primary"):
             with st.expander("查看当前结构化数据（调试用）", expanded=False):
                 st.json(people)
 
-            st.success("已生成家系图（家庭块布局完整版）。")
+            st.success("已生成家系图（已按你要求调整线长/标签/箭头）。")
 
     except Exception as e:
         st.error(f"生成失败：{e}")
