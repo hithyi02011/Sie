@@ -2,7 +2,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Pedigree Drawer (spouse_id)", layout="wide")
+st.set_page_config(page_title="Pedigree Drawer (Family Blocks)", layout="wide")
 
 # =============================
 # 默认示例数据（含 spouse_id）
@@ -24,7 +24,7 @@ DEFAULT_ROWS = [
     {"id":"P9","name":"弟弟","sex":"M","affected":True,  "deceased":True,  "father_id":"P2","mother_id":"P3","spouse_id":"","proband":False,"birth_order":3},
     {"id":"P10","name":"妹妹","sex":"F","affected":True, "deceased":True,  "father_id":"P2","mother_id":"P3","spouse_id":"P16","proband":False,"birth_order":4},
 
-    # 配偶们（即使没孩子也能显示，因为有 spouse_id）
+    # 配偶（无子代也能显示）
     {"id":"P11","name":"配偶","sex":"M","affected":False, "deceased":False, "father_id":"","mother_id":"","spouse_id":"P1","proband":False,"birth_order":None},
     {"id":"P14","name":"姐夫","sex":"M","affected":False, "deceased":False, "father_id":"","mother_id":"","spouse_id":"P8","proband":False,"birth_order":None},
     {"id":"P16","name":"妹夫","sex":"M","affected":False, "deceased":False, "father_id":"","mother_id":"","spouse_id":"P10","proband":False,"birth_order":None},
@@ -33,20 +33,19 @@ DEFAULT_ROWS = [
     {"id":"P12","name":"儿子","sex":"M","affected":False, "deceased":False, "father_id":"P11","mother_id":"P1","spouse_id":"","proband":False,"birth_order":1},
     {"id":"P13","name":"女儿","sex":"F","affected":False, "deceased":False, "father_id":"P11","mother_id":"P1","spouse_id":"","proband":False,"birth_order":2},
 
-    # 姐姐子代（侄子）
+    # 姐姐子代
     {"id":"P15","name":"侄子","sex":"M","affected":False, "deceased":False, "father_id":"P14","mother_id":"P8","spouse_id":"","proband":False,"birth_order":1},
 ]
 
 # =============================
-# 基础转换
+# 基础工具
 # =============================
 def to_bool(v):
     if isinstance(v, bool):
         return v
     if pd.isna(v):
         return False
-    s = str(v).strip().lower()
-    return s in ["true", "1", "yes", "y", "是"]
+    return str(v).strip().lower() in ["true", "1", "yes", "y", "是"]
 
 def to_int_or_none(v):
     if pd.isna(v):
@@ -71,7 +70,6 @@ def df_to_people(df: pd.DataFrame):
         pid = clean_id(r.get("id", ""))
         if not pid:
             continue
-
         rows.append({
             "id": pid,
             "name": str(r.get("name", "")).strip() or pid,
@@ -86,60 +84,6 @@ def df_to_people(df: pd.DataFrame):
         })
     return rows
 
-# =============================
-# 校验
-# =============================
-def validate_people(people):
-    if not isinstance(people, list):
-        raise ValueError("输入数据必须是列表。")
-
-    ids = [p.get("id") for p in people]
-    if any(i is None or str(i).strip() == "" for i in ids):
-        raise ValueError("每个人都必须有 id。")
-    if len(ids) != len(set(ids)):
-        raise ValueError("存在重复 id，请检查（id 不能重复）。")
-
-    person_map = {p["id"]: p for p in people}
-    id_set = set(person_map.keys())
-
-    for p in people:
-        if p.get("sex") not in ["M", "F", "U"]:
-            raise ValueError(f"{p['id']} 的 sex 必须是 M/F/U。")
-
-        for k in ["father_id", "mother_id", "spouse_id"]:
-            v = p.get(k)
-            if v and v not in id_set:
-                raise ValueError(f"{p['id']} 的 {k}={v} 不存在（请先添加该人物）。")
-
-        if p.get("spouse_id") == p["id"]:
-            raise ValueError(f"{p['id']} 的 spouse_id 不能指向自己。")
-
-    # proband 最多一个
-    probands = [p["id"] for p in people if p.get("proband")]
-    if len(probands) > 1:
-        raise ValueError(f"只能有一个患者（proband=True），当前有多个：{probands}")
-
-    # 同父同母 children birth_order 不重复
-    fam_orders = {}
-    for p in people:
-        fid, mid, bo = p.get("father_id"), p.get("mother_id"), p.get("birth_order")
-        if fid and mid and bo is not None:
-            key = (fid, mid)
-            fam_orders.setdefault(key, set())
-            if bo in fam_orders[key]:
-                raise ValueError(f"同一父母({fid},{mid})下出现重复 birth_order={bo}")
-            fam_orders[key].add(bo)
-
-    # spouse_id 对称性（建议严格一点，避免显示混乱）
-    for p in people:
-        sid = p.get("spouse_id")
-        if sid:
-            other = person_map[sid]
-            if other.get("spouse_id") != p["id"]:
-                raise ValueError(
-                    f"婚配关系需要成对填写：{p['id']}.spouse_id={sid}，但 {sid}.spouse_id 不是 {p['id']}"
-                )
-
 def get_person_map(people):
     return {p["id"]: p for p in people}
 
@@ -150,7 +94,56 @@ def find_proband_id(people):
     return None
 
 # =============================
-# 代际 / 家庭
+# 校验
+# =============================
+def validate_people(people):
+    ids = [p.get("id") for p in people]
+    if any(not i for i in ids):
+        raise ValueError("每个人都必须有 id。")
+    if len(ids) != len(set(ids)):
+        raise ValueError("存在重复 id（id 不能重复）。")
+
+    person_map = get_person_map(people)
+    id_set = set(person_map.keys())
+
+    for p in people:
+        if p["sex"] not in ["M", "F", "U"]:
+            raise ValueError(f"{p['id']} 的 sex 必须是 M/F/U。")
+        for k in ["father_id", "mother_id", "spouse_id"]:
+            v = p.get(k)
+            if v and v not in id_set:
+                raise ValueError(f"{p['id']} 的 {k}={v} 不存在。")
+        if p.get("spouse_id") == p["id"]:
+            raise ValueError(f"{p['id']} 的 spouse_id 不能指向自己。")
+
+    # spouse_id 对称
+    for p in people:
+        sid = p.get("spouse_id")
+        if sid:
+            other = person_map[sid]
+            if other.get("spouse_id") != p["id"]:
+                raise ValueError(
+                    f"婚配关系需成对填写：{p['id']}.spouse_id={sid}，但 {sid}.spouse_id 不是 {p['id']}"
+                )
+
+    # proband 最多一个
+    probands = [p["id"] for p in people if p.get("proband")]
+    if len(probands) > 1:
+        raise ValueError(f"只能有一个患者（proband=True），当前有多个：{probands}")
+
+    # 同父同母 children 的 birth_order 不重复
+    fam_orders = {}
+    for p in people:
+        fid, mid, bo = p.get("father_id"), p.get("mother_id"), p.get("birth_order")
+        if fid and mid and bo is not None:
+            key = (fid, mid)
+            fam_orders.setdefault(key, set())
+            if bo in fam_orders[key]:
+                raise ValueError(f"同一父母({fid},{mid})下出现重复 birth_order={bo}")
+            fam_orders[key].add(bo)
+
+# =============================
+# 代际 / 家庭结构
 # =============================
 def compute_generations(people):
     person_map = get_person_map(people)
@@ -167,11 +160,10 @@ def compute_generations(people):
 
         p = person_map[pid]
         parent_gens = []
-        for parent_key in ["father_id", "mother_id"]:
-            par = p.get(parent_key)
+        for k in ["father_id", "mother_id"]:
+            par = p.get(k)
             if par in person_map:
                 parent_gens.append(get_gen(par, visiting))
-
         g = 0 if not parent_gens else max(parent_gens) + 1
         gen[pid] = g
         visiting.remove(pid)
@@ -183,8 +175,7 @@ def compute_generations(people):
 
 def build_child_families(people):
     """
-    由孩子反推父母家庭：
-    child_families[(father_id, mother_id)] = [child_ids...]
+    child_fams[(father_id, mother_id)] = [child_ids...]
     """
     person_map = get_person_map(people)
 
@@ -192,28 +183,23 @@ def build_child_families(people):
         bo = person_map[cid].get("birth_order")
         return (bo is None, bo if bo is not None else 999999, cid)
 
-    fam = {}
+    fams = {}
     for p in people:
         fid, mid = p.get("father_id"), p.get("mother_id")
         if fid and mid:
-            fam.setdefault((fid, mid), []).append(p["id"])
+            fams.setdefault((fid, mid), []).append(p["id"])
 
-    for k in fam:
-        fam[k] = sorted(fam[k], key=child_sort_key)
-    return fam
+    for k in fams:
+        fams[k] = sorted(fams[k], key=child_sort_key)
+    return fams
 
 def build_spouse_pairs(people):
-    """
-    基于 spouse_id 构建配偶对（无序去重）
-    返回 list[(id1,id2)]，保证顺序稳定（按id排序后存）
-    """
-    person_map = get_person_map(people)
     seen = set()
     pairs = []
     for p in people:
         a = p["id"]
         b = p.get("spouse_id")
-        if not b or b not in person_map:
+        if not b:
             continue
         key = tuple(sorted([a, b]))
         if key in seen:
@@ -222,49 +208,73 @@ def build_spouse_pairs(people):
         pairs.append(key)
     return pairs
 
-def person_children_map(child_families):
-    """
-    返回每个人参与的“父母家庭键”
-    e.g. P1 -> [(P11,P1)] if patient is mother in that family
-    """
+def person_children_map(child_fams):
     m = {}
-    for (fid, mid), chs in child_families.items():
+    for (fid, mid), _children in child_fams.items():
         m.setdefault(fid, []).append((fid, mid))
         m.setdefault(mid, []).append((fid, mid))
     return m
 
 # =============================
-# 布局（结构化 + spouse_id）
-# 目标：
-# 1) 配偶跟着本人（即使没孩子）
-# 2) 患者原生家庭居中
-# 3) 父系/母系祖辈在上
-# 4) 同胞的“小家庭”（配偶+子代）在下
-# 5) 留足标签空间
+# 家庭块布局（核心修复）
 # =============================
+def build_sibling_blocks(sibling_ids, person_map, child_fams, x_gap=160, spouse_gap=105, block_gap=120):
+    """
+    同胞层按“家庭块”排，而不是按单人排。
+    """
+    p2fams = person_children_map(child_fams)
+    blocks = []
+
+    for sid in sibling_ids:
+        sp = person_map[sid].get("spouse_id")
+        fam_keys = p2fams.get(sid, [])
+
+        preferred = None
+        if sp:
+            for k in fam_keys:
+                if set(k) == set([sid, sp]):
+                    preferred = k
+                    break
+        if preferred is None and fam_keys:
+            preferred = fam_keys[0]
+
+        children = child_fams.get(preferred, []) if preferred else []
+
+        # 宽度估算：要能容纳夫妻 + 子代展开
+        couple_w = spouse_gap if sp else 0
+        child_w = (len(children) - 1) * x_gap if len(children) >= 2 else 0
+        width = max(90, couple_w, child_w) + block_gap
+
+        blocks.append({
+            "anchor": sid,
+            "spouse": sp,
+            "family_key": preferred,
+            "children": children,
+            "width": width,
+        })
+
+    return blocks
+
 def structured_layout(people):
     validate_people(people)
     person_map = get_person_map(people)
     gen = compute_generations(people)
     child_fams = build_child_families(people)
-    spouse_pairs = build_spouse_pairs(people)
-    p2fams = person_children_map(child_fams)
 
-    # ---- 布局参数（偏“留白优先”）----
-    x_gap = 160            # 同胞间距
-    y_gap = 250            # 代际间距（加大，给文字留空间）
-    spouse_gap = 105       # 夫妻间距（中心点）
+    # ---- 参数（留白优先）----
+    x_gap = 165            # 同胞/子代间距
+    y_gap = 255            # 代际间距
+    spouse_gap = 110       # 夫妻中心间距
     margin_x = 120
     margin_y = 110
-    upper_side_gap = 210   # 上方祖辈左右块与中心的间距
-    lower_family_offset = 115  # 同胞配偶相对本人横向偏移
-    label_safe_extra = 0
-    # ---------------------------------
+    upper_side_gap = 220   # 祖辈块左右间距
+    block_gap = 125        # 同胞家庭块间距（关键）
+    reserve_gap = 240
+    # ------------------------
 
     coords = {}
     proband_id = find_proband_id(people)
 
-    # 兜底：没有患者就按代际简单排
     if not proband_id:
         return fallback_layout(people, gen, child_fams, x_gap, y_gap, margin_x, margin_y)
 
@@ -272,132 +282,103 @@ def structured_layout(people):
     father_id = proband.get("father_id")
     mother_id = proband.get("mother_id")
 
-    # 核心原生家庭孩子（同胞）
-    sibling_ids = []
+    # 核心原生家庭同胞
     if father_id and mother_id and (father_id, mother_id) in child_fams:
         sibling_ids = child_fams[(father_id, mother_id)][:]
     else:
         sibling_ids = [proband_id]
-
     if proband_id not in sibling_ids:
         sibling_ids.append(proband_id)
 
-    # 保证排序稳定
     sibling_ids = sorted(sibling_ids, key=lambda pid: (
         person_map[pid].get("birth_order") is None,
         person_map[pid].get("birth_order") if person_map[pid].get("birth_order") is not None else 999999,
         pid
     ))
 
-    # 层级y
-    y_gp = margin_y                 # 祖辈层
-    y_parents = margin_y + y_gap    # 父母层
-    y_sibs = margin_y + 2*y_gap     # 患者/同胞层
-    y_desc = margin_y + 3*y_gap     # 儿女/侄子层（最多展开一层）
+    # 层级
+    y_gp = margin_y
+    y_parents = margin_y + y_gap
+    y_sibs = margin_y + 2 * y_gap
+    y_desc = margin_y + 3 * y_gap
 
-    # 中心x（围绕患者原生家庭）
-    cx = margin_x + 650
+    cx = margin_x + 760  # 中间基准
 
-    # 1) 放父母（居中）
+    # 1) 父母居中
     if father_id:
-        coords[father_id] = (cx - spouse_gap//2, y_parents)
+        coords[father_id] = (cx - spouse_gap / 2, y_parents)
     if mother_id:
-        coords[mother_id] = (cx + spouse_gap//2, y_parents)
+        coords[mother_id] = (cx + spouse_gap / 2, y_parents)
 
-    # 2) 放同胞（围绕父母中点）
     if father_id in coords and mother_id in coords:
         sib_center_x = (coords[father_id][0] + coords[mother_id][0]) / 2
     else:
         sib_center_x = cx
-    n_sib = len(sibling_ids)
-    sib_start_x = sib_center_x - ((n_sib - 1) * x_gap) / 2
-    for i, sid in enumerate(sibling_ids):
-        coords[sid] = (sib_start_x + i * x_gap, y_sibs)
 
-    # 3) 放父系祖辈（父亲原生家庭）
+    # 2) 同胞层改为“家庭块布局”
+    blocks = build_sibling_blocks(
+        sibling_ids, person_map, child_fams, x_gap=x_gap, spouse_gap=spouse_gap, block_gap=block_gap
+    )
+
+    total_w = sum(b["width"] for b in blocks) if blocks else 0
+    start_x = sib_center_x - total_w / 2
+
+    cursor = start_x
+    for b in blocks:
+        sid = b["anchor"]
+        sp = b["spouse"]
+        block_center = cursor + b["width"] / 2
+
+        if sp:
+            # 让“本人”尽量靠近核心中心（更整齐）
+            # 若本人在核心中心左侧，则配偶放右；反之配偶放左
+            if block_center <= sib_center_x:
+                coords[sid] = (block_center - spouse_gap / 2, y_sibs)
+                coords[sp] = (block_center + spouse_gap / 2, y_sibs)
+            else:
+                coords[sid] = (block_center - spouse_gap / 2, y_sibs)
+                coords[sp] = (block_center + spouse_gap / 2, y_sibs)
+        else:
+            coords[sid] = (block_center, y_sibs)
+
+        cursor += b["width"]
+
+    # 3) 父系祖辈
     if father_id and father_id in person_map:
         ff = person_map[father_id].get("father_id")
         fm = person_map[father_id].get("mother_id")
         if ff and fm:
             fx, _ = coords[father_id]
-            coords[ff] = (fx - upper_side_gap//2, y_gp)
-            coords[fm] = (fx + upper_side_gap//2, y_gp)
+            coords[ff] = (fx - upper_side_gap / 2, y_gp)
+            coords[fm] = (fx + upper_side_gap / 2, y_gp)
 
-    # 4) 放母系祖辈（母亲原生家庭）
+    # 4) 母系祖辈
     if mother_id and mother_id in person_map:
         mf = person_map[mother_id].get("father_id")
         mm = person_map[mother_id].get("mother_id")
         if mf and mm:
             mx, _ = coords[mother_id]
-            coords[mf] = (mx - upper_side_gap//2, y_gp)
-            coords[mm] = (mx + upper_side_gap//2, y_gp)
+            coords[mf] = (mx - upper_side_gap / 2, y_gp)
+            coords[mm] = (mx + upper_side_gap / 2, y_gp)
 
-    # 5) 放“同胞各自配偶”（spouse_id 驱动，即使没孩子也放）
-    #    关键：配偶跟着本人，不再丢到 leftovers
-    sibling_set = set(sibling_ids)
-
-    def place_spouse_near(anchor_id, spouse_id):
-        ax, ay = coords[anchor_id]
-        # 默认放右侧；如果右侧太近（挤到别的同胞），尝试左侧
-        right_x = ax + lower_family_offset
-        left_x = ax - lower_family_offset
-
-        def collide(tx):
-            for pid2, (ox, oy) in coords.items():
-                if pid2 in [anchor_id, spouse_id]:
-                    continue
-                if abs(oy - ay) < 10 and abs(ox - tx) < 70:
-                    return True
-            return False
-
-        # 男左女右不是硬性，这里以避碰优先
-        if not collide(right_x):
-            coords[spouse_id] = (right_x, ay)
-        elif not collide(left_x):
-            coords[spouse_id] = (left_x, ay)
-        else:
-            # 实在挤，就右侧更远一点
-            coords[spouse_id] = (ax + lower_family_offset + 70, ay)
-
-    for sid in sibling_ids:
-        sp = person_map[sid].get("spouse_id")
-        if sp and sp not in coords:
-            place_spouse_near(sid, sp)
-
-    # 6) 放“同胞的子代”（儿女/侄子等）到下一层
-    #    使用孩子家庭 (fid,mid)
-    for sid in sibling_ids:
-        fam_keys = p2fams.get(sid, [])
-        # 常见场景一个人只展开一个小家庭；这里仍取第一个
-        if not fam_keys:
+    # 5) 同胞各自子代：按 block 的家庭中心展开（减少穿到隔壁）
+    for b in blocks:
+        fam_key = b["family_key"]
+        children = b["children"]
+        if not fam_key or not children:
             continue
 
-        # 优先选真正包含 sid 与其 spouse_id 的家庭
-        preferred = None
-        sid_spouse = person_map[sid].get("spouse_id")
-        for k in fam_keys:
-            fid, mid = k
-            if sid_spouse and set([fid, mid]) == set([sid, sid_spouse]):
-                preferred = k
-                break
-        if preferred is None:
-            preferred = fam_keys[0]
-
-        fid, mid = preferred
-        children = child_fams.get((fid, mid), [])
-        if not children:
-            continue
+        fid, mid = fam_key
         if fid not in coords or mid not in coords:
             continue
 
         center_x = (coords[fid][0] + coords[mid][0]) / 2
         n = len(children)
-        start_x = center_x - ((n - 1) * x_gap) / 2
+        start_x_children = center_x - ((n - 1) * x_gap) / 2
         for i, cid in enumerate(children):
-            coords[cid] = (start_x + i * x_gap, y_desc)
+            coords[cid] = (start_x_children + i * x_gap, y_desc)
 
-    # 7) 放父母的配偶（理论上已放），以及祖辈的配偶（理论上已放）
-    #    spouse_id驱动的兜底：若某人已定位而其配偶未定位，则贴旁边
+    # 6) spouse_id 兜底：若有已定位人物的配偶未定位，贴旁边（很少触发）
     changed = True
     loops = 0
     while changed and loops < 3:
@@ -410,21 +391,19 @@ def structured_layout(people):
                 continue
             if a in coords and b not in coords:
                 ax, ay = coords[a]
-                # 一般放右侧，若冲突则左侧
                 tx = ax + spouse_gap
-                if any(abs(ox - tx) < 70 and abs(oy - ay) < 10 for pid2, (ox, oy) in coords.items() if pid2 != a):
+                if any(abs(ox - tx) < 75 and abs(oy - ay) < 8 for pid2, (ox, oy) in coords.items() if pid2 != a):
                     tx = ax - spouse_gap
                 coords[b] = (tx, ay)
                 changed = True
 
-    # 8) 其余未放人物放到右侧备用区（避免串主线）
+    # 7) 其余未定位放右侧备用区（避免串主线）
     unplaced = [p["id"] for p in people if p["id"] not in coords]
     if unplaced:
-        reserve_x = max(x for x, _ in coords.values()) + 220 if coords else 900
+        reserve_x = (max(x for x, _ in coords.values()) + reserve_gap) if coords else 1200
         by_gen = {}
         for pid in unplaced:
             by_gen.setdefault(gen.get(pid, 0), []).append(pid)
-
         for g in sorted(by_gen.keys()):
             y = margin_y + g * y_gap
             x = reserve_x
@@ -432,19 +411,12 @@ def structured_layout(people):
                 coords[pid] = (x, y)
                 x += x_gap
 
-    # 9) 画布尺寸
-    if coords:
-        xs = [x for x, _ in coords.values()]
-        ys = [y for _, y in coords.values()]
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
-    else:
-        min_x = 0
-        max_x = 1200
-        min_y = 0
-        max_y = 900
+    # 8) 画布尺寸
+    xs = [x for x, _ in coords.values()] if coords else [0]
+    ys = [y for _, y in coords.values()] if coords else [0]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
 
-    # 整体右移避免负坐标
     if min_x < 60:
         shift = 70 - min_x
         for pid in list(coords.keys()):
@@ -452,8 +424,9 @@ def structured_layout(people):
             coords[pid] = (x + shift, y)
         max_x += shift
 
-    width = int(max_x + 260)
-    height = int(max_y + 300)  # 底部留更多给标签
+    width = int(max_x + 280)
+    height = int(max_y + 330)  # 给文字更多底部空间
+
     return coords, child_fams, width, height, gen
 
 def fallback_layout(people, gen, child_fams, x_gap, y_gap, margin_x, margin_y):
@@ -461,15 +434,15 @@ def fallback_layout(people, gen, child_fams, x_gap, y_gap, margin_x, margin_y):
     gen_to_ids = {}
     for p in people:
         gen_to_ids.setdefault(gen[p["id"]], []).append(p["id"])
-    for g, ids in gen_to_ids.items():
+    for g in sorted(gen_to_ids.keys()):
         y = margin_y + g * y_gap
         x = margin_x
-        for pid in sorted(ids):
+        for pid in sorted(gen_to_ids[g]):
             coords[pid] = (x, y)
             x += x_gap
     max_x = max(x for x, _ in coords.values()) if coords else 1000
     max_y = max(y for _, y in coords.values()) if coords else 700
-    return coords, child_fams, int(max_x + 220), int(max_y + 260), gen
+    return coords, child_fams, int(max_x + 260), int(max_y + 300), gen
 
 # =============================
 # SVG 绘制
@@ -483,43 +456,81 @@ def line(x1, y1, x2, y2, w=2.5):
 def choose_arrow_anchor(x, y, width, height, used=None):
     if used is None:
         used = []
-
     candidates = [
-        (x - 130, y - 95, x - 30, y - 24),  # 左上（更远）
-        (x + 130, y - 95, x + 30, y - 24),  # 右上
-        (x - 130, y + 95, x - 30, y + 24),  # 左下
-        (x + 130, y + 95, x + 30, y + 24),  # 右下
+        (x - 135, y - 95, x - 30, y - 24),
+        (x + 135, y - 95, x + 30, y - 24),
+        (x - 135, y + 95, x - 30, y + 24),
+        (x + 135, y + 95, x + 30, y + 24),
     ]
-
     def score(c):
         tx1, ty1, tx2, ty2 = c
         penalty = 0
         if tx1 < 10 or tx1 > width - 10 or ty1 < 45 or ty1 > height - 10:
             penalty += 1000
         for ex, ey in used:
-            d2 = (tx1 - ex) ** 2 + (ty1 - ey) ** 2
-            if d2 < 95 ** 2:
+            if (tx1-ex)**2 + (ty1-ey)**2 < 95**2:
                 penalty += 250
-        # 优先上方
         if ty1 > y:
             penalty += 20
         return penalty
-
     return min(candidates, key=score)
+
+def compute_label_positions(people, coords, base_offset=78, near_x_threshold=130):
+    """
+    简单标签避让：
+    同一层里 x 很近的标签交替下移，减少“妹妹妹妹”“弟弟配偶”式重叠
+    """
+    rows = {}
+    for p in people:
+        pid = p["id"]
+        if pid not in coords:
+            continue
+        x, y = coords[pid]
+        rows.setdefault(round(y), []).append((pid, x, y))
+
+    label_pos = {}
+    for _row_y, items in rows.items():
+        items.sort(key=lambda t: t[1])  # 按x排序
+        cluster = []
+        clusters = []
+
+        for item in items:
+            if not cluster:
+                cluster = [item]
+            else:
+                prev = cluster[-1]
+                if abs(item[1] - prev[1]) < near_x_threshold:
+                    cluster.append(item)
+                else:
+                    clusters.append(cluster)
+                    cluster = [item]
+        if cluster:
+            clusters.append(cluster)
+
+        # 每个 cluster 内交替下移
+        for cl in clusters:
+            for i, (pid, x, y) in enumerate(cl):
+                extra = 0
+                if len(cl) > 1:
+                    # 0, +18, +36, +18, ...
+                    pattern = [0, 18, 36, 18, 36, 54]
+                    extra = pattern[i] if i < len(pattern) else 18 * (i % 3)
+                label_pos[pid] = (x, y + base_offset + extra)
+
+    return label_pos
 
 def pedigree_to_svg(people, title="Pedigree", show_labels=True):
     validate_people(people)
-    person_map = get_person_map(people)
-    coords, child_fams, width, height, gen = structured_layout(people)
+    coords, child_fams, width, height, _gen = structured_layout(people)
 
-    # 图形参数（留白优先）
+    # 参数
     r = 26
     base_stroke = 2.6
     proband_stroke = 3.8
     spouse_line_w = 2.4
     label_font = 13
-    label_offset = 76      # 明显下移，避免压线
-    child_bar_drop = 42    # 子代横线离夫妻线距离（减少与标签冲突）
+    label_offset = 78
+    child_bar_drop = 42
 
     svg = []
     svg.append(
@@ -531,19 +542,16 @@ def pedigree_to_svg(people, title="Pedigree", show_labels=True):
         f'font-family="Arial, Microsoft YaHei">{esc(title)}</text>'
     )
 
-    # 1) 夫妻线（基于 spouse_id，保证无子代配偶也能连）
-    spouse_pairs = build_spouse_pairs(people)
-    for a, b in spouse_pairs:
+    # 1) 夫妻线（spouse_id）
+    for a, b in build_spouse_pairs(people):
         if a not in coords or b not in coords:
             continue
         ax, ay = coords[a]
         bx, by = coords[b]
-        # 按当前布局应在同一层；若略有不同仍画水平用 ay
         left_x, right_x = sorted([ax, bx])
-        y = ay
-        svg.append(line(left_x, y, right_x, y, spouse_line_w))
+        svg.append(line(left_x, ay, right_x, ay, spouse_line_w))
 
-    # 2) 父母-子代连线（基于 child_fams）
+    # 2) 父母-子代连线（child_fams）
     for (fid, mid), children in child_fams.items():
         if fid not in coords or mid not in coords:
             continue
@@ -552,11 +560,10 @@ def pedigree_to_svg(people, title="Pedigree", show_labels=True):
 
         fx, fy = coords[fid]
         mx, my = coords[mid]
-        cx = (fx + mx) / 2
         spouse_y = fy
+        cx = (fx + mx) / 2
         y_sib = spouse_y + child_bar_drop
 
-        # 中轴竖线（夫妻线中点 -> 子代横线）
         svg.append(line(cx, spouse_y, cx, y_sib, spouse_line_w))
 
         valid_children = [cid for cid in children if cid in coords]
@@ -574,7 +581,10 @@ def pedigree_to_svg(people, title="Pedigree", show_labels=True):
         for px, py in child_points:
             svg.append(line(px, y_sib, px, py - r, spouse_line_w))
 
-    # 3) 人物节点
+    # 3) 标签位置（先算，后画人）
+    label_positions = compute_label_positions(people, coords, base_offset=label_offset, near_x_threshold=130)
+
+    # 4) 人物节点
     probands = []
     for p in people:
         pid = p["id"]
@@ -615,24 +625,28 @@ def pedigree_to_svg(people, title="Pedigree", show_labels=True):
             ey = r + 12
             svg.append(line(x - ex, y + ey, x + ex, y - ey, 3.0))
 
-        if show_labels:
+    # 5) 标签（最后画，避免被线/图形压住）
+    if show_labels:
+        for p in people:
+            pid = p["id"]
+            if pid not in coords or pid not in label_positions:
+                continue
+            lx, ly = label_positions[pid]
             svg.append(
-                f'<text x="{x}" y="{y+label_offset}" text-anchor="middle" '
-                f'font-size="{label_font}" font-family="Arial, Microsoft YaHei">{esc(name)}</text>'
+                f'<text x="{lx}" y="{ly}" text-anchor="middle" '
+                f'font-size="{label_font}" font-family="Arial, Microsoft YaHei">{esc(p.get("name", pid))}</text>'
             )
 
-    # 4) 先证者箭头（更远）
+    # 6) 先证者箭头（更远）
     used_arrow_tails = []
     for pid in probands:
         x, y = coords[pid]
         ax1, ay1, ax2, ay2 = choose_arrow_anchor(x, y, width, height, used_arrow_tails)
         used_arrow_tails.append((ax1, ay1))
-
         svg.append(line(ax1, ay1, ax2, ay2, 2.4))
 
         dx = ax2 - ax1
         dy = ay2 - ay1
-        # 箭头头 V 字
         if dx < 0 and dy < 0:
             svg.append(line(ax2, ay2, ax2 + 9, ay2 + 2, 2.4))
             svg.append(line(ax2, ay2, ax2 + 2, ay2 + 9, 2.4))
@@ -652,8 +666,8 @@ def pedigree_to_svg(people, title="Pedigree", show_labels=True):
 # =============================
 # UI
 # =============================
-st.title("家系图绘制器（网页填表版｜支持 spouse_id）")
-st.caption("支持：无子代配偶显示（如妹夫/弟媳）、出生顺序、死亡斜杠、先证者箭头、儿女/侄子等。")
+st.title("家系图绘制器（网页填表版｜家庭块布局）")
+st.caption("支持 spouse_id（无子代配偶也可显示）、出生顺序、死亡斜杠、患者箭头、儿女/侄子等。")
 
 if "pedigree_df" not in st.session_state:
     st.session_state.pedigree_df = pd.DataFrame(DEFAULT_ROWS)
@@ -678,17 +692,17 @@ edited_df = st.data_editor(
     use_container_width=True,
     column_config={
         "id": st.column_config.TextColumn("id", help="唯一编号，例如 P1/P2"),
-        "name": st.column_config.TextColumn("姓名/称谓", help="如 患者、父亲、妹妹、妹夫、儿子、侄子"),
+        "name": st.column_config.TextColumn("姓名/称谓", help="如 患者、姐姐、姐夫、妹夫、儿子、侄子"),
         "sex": st.column_config.SelectboxColumn("性别", options=["M", "F", "U"], help="M男 F女 U不明"),
         "affected": st.column_config.CheckboxColumn("患病", help="勾选=实心"),
         "deceased": st.column_config.CheckboxColumn("死亡", help="勾选=斜杠（伸出图形）"),
         "father_id": st.column_config.TextColumn("父亲id", help="填父亲的 id；无可留空"),
         "mother_id": st.column_config.TextColumn("母亲id", help="填母亲的 id；无可留空"),
-        "spouse_id": st.column_config.TextColumn("配偶id", help="可选；即使无子代也可指定婚配关系"),
+        "spouse_id": st.column_config.TextColumn("配偶id", help="可选；无子代也建议填（如妹夫/弟媳）"),
         "proband": st.column_config.CheckboxColumn("患者(先证者)", help="只能有一个"),
         "birth_order": st.column_config.NumberColumn(
             "出生顺序",
-            help="同一父母下子女排序：1=最大，2=次大，3=更小（左到右）",
+            help="同一父母下子女排序：1最大，2次大...（左到右）",
             step=1,
             min_value=1
         ),
@@ -709,13 +723,12 @@ if st.button("3) 生成家系图", type="primary"):
             svg_html = pedigree_to_svg(people, title=graph_title, show_labels=show_labels)
 
             st.markdown("### 生成结果")
-            # 高一点，给多代/文字留空间
-            components.html(svg_html, height=1050, scrolling=True)
+            components.html(svg_html, height=1100, scrolling=True)
 
             with st.expander("查看当前结构化数据（调试用）", expanded=False):
                 st.json(people)
 
-            st.success("已生成家系图（spouse_id版）。")
+            st.success("已生成家系图（家庭块布局完整版）。")
 
     except Exception as e:
         st.error(f"生成失败：{e}")
@@ -730,20 +743,20 @@ with st.expander("填写说明（建议第一次看）", expanded=False):
 - `affected`：勾选=实心（患病）
 - `deceased`：勾选=斜杠（死亡）
 - `father_id` / `mother_id`：填父母的 `id`（不是名字）
-- `spouse_id`：配偶的 `id`（**即使没有孩子也建议填**，这样配偶会正确贴在一起）
+- `spouse_id`：配偶的 `id`（**即使没有孩子也建议填**）
 - `proband`：患者/先证者（只能一个）
 - `birth_order`：同一父母下子女排序（1最大，左到右）
 
-### 关键规则（很重要）
-1. **婚配关系请成对填写**
+### 很重要的规则
+1. **婚配关系要成对填写**
    - 例如：
    - 妹妹 `spouse_id = P16`
    - 妹夫 `spouse_id = P10`
 
-2. **孩子尽量同时填写 father_id 和 mother_id**
-   - 这样连线和布局最稳
+2. **孩子尽量同时填写 father_id + mother_id**
+   - 连线和布局会更稳
 
-### 示例
+### 例子
 - 患者 `P1`、配偶 `P11`
   - 儿子：`father_id=P11`, `mother_id=P1`
   - 女儿：`father_id=P11`, `mother_id=P1`
@@ -751,6 +764,6 @@ with st.expander("填写说明（建议第一次看）", expanded=False):
 - 姐姐 `P8`、姐夫 `P14`
   - 侄子：`father_id=P14`, `mother_id=P8`
 
-- 妹妹 `P10`、妹夫 `P16`（暂时没孩子也没关系）
-  - 只要双方 `spouse_id` 互相写上，就会显示为一对夫妻
+- 妹妹 `P10`、妹夫 `P16`（暂时没孩子也可以）
+  - 双方互填 `spouse_id` 即可显示为一对
 """)
